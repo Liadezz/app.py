@@ -1,0 +1,892 @@
+import streamlit as st
+import json
+import os
+from datetime import datetime, date
+from pathlib import Path
+import pandas as pd
+import streamlit.components.v1 as components
+
+st.set_page_config(
+    page_title="Central de Atendimentos",
+    page_icon="📡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ── Persistência ──────────────────────────────────────────────────────────────
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+HIST_FILE  = DATA_DIR / "historico.json"
+NOTAS_FILE = DATA_DIR / "notas.txt"
+
+def load_historico():
+    if HIST_FILE.exists():
+        return json.loads(HIST_FILE.read_text(encoding="utf-8"))
+    return []
+
+def save_historico(data):
+    HIST_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def load_notas():
+    return NOTAS_FILE.read_text(encoding="utf-8") if NOTAS_FILE.exists() else ""
+
+def save_notas(t):
+    NOTAS_FILE.write_text(t, encoding="utf-8")
+
+# ── Session state ─────────────────────────────────────────────────────────────
+for k, v in {
+    "historico": load_historico(),
+    "output_registro": "",
+    "output_cliente": "",
+    "tema": "dark",
+    "versoes": [],
+    "pagina": "atendimento",
+    "clear_flag": 0,
+    "chat_msgs": [],
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ── Groq ──────────────────────────────────────────────────────────────────────
+def chamar_ia(prompt, system="Você é um assistente especialista em suporte técnico de provedores de internet (ISP) no Brasil."):
+    try:
+        from groq import Groq
+        key = os.environ.get("GROQ_API_KEY", "")
+        if not key:
+            return "[ERRO: configure GROQ_API_KEY no CMD antes de rodar]"
+        client = Groq(api_key=key)
+        msgs = [{"role": "system", "content": system}]
+        if isinstance(prompt, list):
+            msgs += prompt
+        else:
+            msgs.append({"role": "user", "content": prompt})
+        r = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=msgs,
+            max_tokens=1500,
+        )
+        return r.choices[0].message.content
+    except Exception as e:
+        return f"[ERRO NA API: {e}]"
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
+def css(tema):
+    if tema == "dark":
+        c = """
+        --bg:#0c0f1a; --panel:#111827; --panel2:#161d2e; --panel3:#1c2540;
+        --line:#1e2d45; --line2:#243352;
+        --hi:#22d3a5; --hi2:#4f8ef7; --hi3:#a78bfa;
+        --fg:#dde3ee; --fg2:#8899b4; --fg3:#b0bed4;
+        --warn:#f5a623; --danger:#f04949; --ok:#22c87a;
+        --sh:0 2px 20px rgba(0,0,0,.45);
+        """
+    else:
+        c = """
+        --bg:#eef1f7; --panel:#ffffff; --panel2:#f5f7fb; --panel3:#eaecf4;
+        --line:#dde2ec; --line2:#c8cfe0;
+        --hi:#0ea271; --hi2:#1d60d4; --hi3:#6d28d9;
+        --fg:#1a2236; --fg2:#5a6782; --fg3:#3d4f6e;
+        --warn:#c07c00; --danger:#d63030; --ok:#0f9e5e;
+        --sh:0 2px 16px rgba(0,0,0,.08);
+        """
+    st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+:root{{{c}}}
+
+*{{box-sizing:border-box;}}
+html,body,[data-testid="stApp"]{{background:var(--bg)!important;color:var(--fg)!important;font-family:'Sora',sans-serif!important;}}
+
+/* Sidebar */
+[data-testid="stSidebar"]{{background:var(--panel)!important;border-right:1px solid var(--line)!important;}}
+[data-testid="stSidebar"] *{{color:var(--fg)!important;font-family:'Sora',sans-serif!important;}}
+[data-testid="stSidebar"] .stRadio label{{font-size:13px!important;font-weight:500!important;padding:6px 0!important;}}
+[data-testid="stSidebar"] [data-testid="stRadio"] > div{{gap:2px!important;}}
+
+/* Headings */
+h1,h2,h3{{font-family:'Sora',sans-serif!important;font-weight:700!important;color:var(--fg)!important;letter-spacing:-0.4px!important;}}
+
+/* Inputs */
+.stTextArea textarea,.stTextInput input{{
+    background:var(--panel)!important;border:1.5px solid var(--line2)!important;
+    color:var(--fg)!important;font-family:'Fira Code',monospace!important;
+    font-size:13px!important;border-radius:9px!important;
+    transition:border .18s,box-shadow .18s!important;
+    padding:10px 12px!important;
+}}
+.stTextArea textarea:focus,.stTextInput input:focus{{
+    border-color:var(--hi)!important;
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--hi) 14%,transparent)!important;
+    outline:none!important;
+}}
+div[data-baseweb="select"] > div{{
+    background:var(--panel)!important;border:1.5px solid var(--line2)!important;
+    border-radius:9px!important;color:var(--fg)!important;font-size:13px!important;
+    font-family:'Sora',sans-serif!important;
+}}
+div[data-baseweb="select"] > div:focus-within{{border-color:var(--hi)!important;}}
+
+/* Buttons base */
+.stButton>button{{
+    background:var(--panel2)!important;border:1.5px solid var(--line2)!important;
+    color:var(--fg3)!important;font-family:'Sora',sans-serif!important;
+    font-size:13px!important;font-weight:500!important;border-radius:9px!important;
+    padding:9px 18px!important;transition:all .18s!important;letter-spacing:.1px!important;
+}}
+.stButton>button:hover{{
+    border-color:var(--hi)!important;color:var(--hi)!important;
+    background:var(--panel3)!important;transform:translateY(-1px)!important;
+    box-shadow:0 4px 14px color-mix(in srgb,var(--hi) 18%,transparent)!important;
+}}
+
+/* Primary button */
+.pri>button{{
+    background:var(--hi)!important;color:#fff!important;
+    border:none!important;font-weight:600!important;
+    box-shadow:0 2px 12px color-mix(in srgb,var(--hi) 35%,transparent)!important;
+}}
+.pri>button:hover{{
+    filter:brightness(1.07)!important;color:#fff!important;
+    box-shadow:0 5px 18px color-mix(in srgb,var(--hi) 45%,transparent)!important;
+    transform:translateY(-2px)!important;
+}}
+
+/* Danger button */
+.dng>button{{
+    background:transparent!important;
+    border:1.5px solid color-mix(in srgb,var(--danger) 40%,transparent)!important;
+    color:var(--danger)!important;
+}}
+.dng>button:hover{{
+    background:color-mix(in srgb,var(--danger) 8%,transparent)!important;
+    border-color:var(--danger)!important;color:var(--danger)!important;
+    box-shadow:none!important;transform:none!important;
+}}
+
+/* Badges */
+.bd{{display:inline-flex;align-items:center;font-family:'Fira Code',monospace;
+    font-size:10px;font-weight:500;padding:3px 9px;border-radius:6px;margin:2px;}}
+.bd-g{{background:color-mix(in srgb,var(--ok) 13%,transparent);color:var(--ok);border:1px solid color-mix(in srgb,var(--ok) 28%,transparent);}}
+.bd-b{{background:color-mix(in srgb,var(--hi2) 13%,transparent);color:var(--hi2);border:1px solid color-mix(in srgb,var(--hi2) 28%,transparent);}}
+.bd-w{{background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 28%,transparent);}}
+.bd-r{{background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 28%,transparent);}}
+.bd-a{{background:color-mix(in srgb,var(--hi) 11%,transparent);color:var(--hi);border:1px solid color-mix(in srgb,var(--hi) 26%,transparent);}}
+.bd-p{{background:color-mix(in srgb,var(--hi3) 13%,transparent);color:var(--hi3);border:1px solid color-mix(in srgb,var(--hi3) 28%,transparent);}}
+
+/* Section label */
+.slbl{{font-family:'Fira Code',monospace;font-size:10px;font-weight:500;
+    color:var(--fg2);text-transform:uppercase;letter-spacing:1.1px;
+    margin-bottom:7px;display:block;}}
+
+/* Output box */
+.outbox{{background:var(--panel2);border:1.5px solid var(--line);border-radius:11px;
+    padding:18px 20px;font-family:'Fira Code',monospace;font-size:12.5px;
+    line-height:1.85;color:var(--fg);white-space:pre-wrap;word-break:break-word;
+    min-height:90px;box-shadow:inset 0 1px 4px rgba(0,0,0,.07);}}
+
+/* Counter widget */
+.ctrbox{{background:linear-gradient(140deg,var(--panel2),var(--panel3));
+    border:1.5px solid var(--line2);border-radius:14px;padding:18px;
+    text-align:center;box-shadow:var(--sh);}}
+.ctrnum{{font-family:'Fira Code',monospace;font-size:40px;font-weight:700;
+    color:var(--hi);line-height:1;text-shadow:0 0 24px color-mix(in srgb,var(--hi) 35%,transparent);}}
+.ctrlbl{{font-size:10px;color:var(--fg2);font-family:'Fira Code',monospace;
+    text-transform:uppercase;letter-spacing:1px;margin-top:4px;}}
+
+/* Page header */
+.phdr{{display:flex;align-items:center;gap:13px;margin-bottom:6px;}}
+.pico{{width:42px;height:42px;background:linear-gradient(135deg,
+    color-mix(in srgb,var(--hi) 18%,transparent),
+    color-mix(in srgb,var(--hi) 5%,transparent));
+    border:1.5px solid color-mix(in srgb,var(--hi) 30%,transparent);
+    border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:19px;
+    box-shadow:0 2px 10px color-mix(in srgb,var(--hi) 12%,transparent);}}
+.ptitle{{font-size:21px;font-weight:700;color:var(--fg);letter-spacing:-.3px;}}
+.psub{{font-size:11px;color:var(--fg2);font-family:'Fira Code',monospace;margin-top:1px;}}
+
+/* Chat */
+.cmsg-user{{background:var(--panel3);border:1px solid var(--line2);
+    border-radius:12px 12px 4px 12px;padding:10px 14px;margin:6px 0;
+    font-size:13px;max-width:85%;margin-left:auto;}}
+.cmsg-ai{{background:color-mix(in srgb,var(--hi) 7%,transparent);
+    border:1px solid color-mix(in srgb,var(--hi) 18%,transparent);
+    border-radius:12px 12px 12px 4px;padding:10px 14px;margin:6px 0;
+    font-size:13px;max-width:90%;white-space:pre-wrap;}}
+.cmsg-label{{font-size:10px;color:var(--fg2);font-family:'Fira Code',monospace;
+    margin-bottom:3px;text-transform:uppercase;letter-spacing:.8px;}}
+
+/* Metrics */
+[data-testid="stMetricValue"]{{color:var(--hi)!important;font-family:'Fira Code',monospace!important;font-size:28px!important;font-weight:700!important;}}
+[data-testid="stMetricLabel"]{{color:var(--fg2)!important;font-size:11px!important;}}
+[data-testid="metric-container"]{{background:var(--panel)!important;border:1.5px solid var(--line)!important;border-radius:12px!important;padding:16px!important;box-shadow:var(--sh)!important;}}
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"]{{background:var(--panel2)!important;border-radius:10px!important;padding:4px!important;gap:2px!important;border:1.5px solid var(--line)!important;}}
+.stTabs [data-baseweb="tab"]{{font-family:'Sora',sans-serif!important;font-size:12.5px!important;font-weight:500!important;color:var(--fg2)!important;border-radius:7px!important;padding:7px 16px!important;}}
+.stTabs [aria-selected="true"]{{background:var(--panel)!important;color:var(--hi)!important;box-shadow:0 1px 6px rgba(0,0,0,.12)!important;}}
+.stTabs [data-baseweb="tab-panel"]{{padding-top:18px!important;}}
+
+/* Expander */
+[data-testid="stExpander"]{{background:var(--panel)!important;border:1.5px solid var(--line)!important;border-radius:12px!important;overflow:hidden!important;}}
+
+/* Divider */
+hr{{border-color:var(--line)!important;margin:18px 0!important;}}
+
+/* Alerts */
+[data-testid="stAlert"]{{border-radius:10px!important;font-size:13px!important;font-family:'Sora',sans-serif!important;}}
+
+.mono{{font-family:'Fira Code',monospace;}}
+.dim{{color:var(--fg2);}}
+.hi{{color:var(--hi);}}
+.sm{{font-size:12px;}}
+</style>""", unsafe_allow_html=True)
+
+css(st.session_state.tema)
+
+# ── Dados ─────────────────────────────────────────────────────────────────────
+TEMPLATES = {
+    "— Selecione —": "",
+    "🔴 Sem Internet":               "Cliente sem acesso à internet. Verificar luzes da ONU, reiniciar equipamento, checar cabo de rede, verificar autenticação.",
+    "🐌 Lentidão / Instabilidade":   "Cliente reclamando de lentidão ou quedas frequentes. Verificar sinal da ONU, testar velocidade, checar interferências no Wi-Fi.",
+    "📶 Problema Wi-Fi":             "Cliente com problema de sinal Wi-Fi. Verificar posicionamento do roteador, dispositivos conectados, interferências de canal.",
+    "🔑 Troca de Senha Wi-Fi":       "Cliente solicita troca de senha da rede Wi-Fi. Acessar painel do roteador, alterar senha, confirmar conexão.",
+    "📺 IPTV / TV Box":              "Problema com IPTV ou TV Box. Verificar conexão da TV Box, checar sinal, reiniciar equipamento, verificar configuração de SVA.",
+    "🏠 Instalação Nova":            "Instalação residencial. Passar cabo, instalar ONU, configurar roteador, testar velocidade, orientar o cliente.",
+    "🔄 Troca de Equipamento":       "Substituição de ONU ou roteador. Retirar equipamento antigo, instalar novo, configurar, testar e registrar número de série.",
+    "💰 Cancelamento":               "Cliente solicita cancelamento do serviço. Verificar motivo, registrar solicitação, informar prazo e procedimentos.",
+    "🔒 Bloqueio Financeiro":        "Serviço bloqueado por inadimplência. Verificar situação financeira, informar ao cliente, registrar ocorrência.",
+    "📡 Sinal Fraco / ONU Alarmada": "ONU com sinal abaixo do esperado ou em estado de alarme (LOS/LOF). Verificar sinal óptico, logs da ONU, acionar equipe de campo.",
+    "🔆 Fibra Atenuada":             "Sinal de fibra com atenuação elevada. Verificar conectores, curvaturas no cabo, emendas. Solicitar nova passagem se necessário.",
+    "🔧 Reset de Equipamento":       "Reset de fábrica no roteador ou ONU. Realizar reset, reconfigurar acesso e Wi-Fi, testar e entregar funcional ao cliente.",
+    "📉 Reduzido":                   "Plano do cliente foi reduzido. Verificar configuração de velocidade no sistema, aplicar perfil correto na ONU, testar após alteração.",
+    "🕸️ Rede Mesh":                  "Problema em rede mesh. Verificar nós da rede, conexão entre os pontos de acesso, reconfigurar mesh se necessário.",
+    "📷 SVA / Câmeras":              "Suporte a câmeras ou SVA. Verificar conexão dos dispositivos, configuração de portas, testar acesso remoto.",
+    "⚡ Rompimento de Fibra":        "Rompimento de cabo de fibra óptica identificado. Registrar ocorrência, acionar equipe de campo para reparo, informar prazo ao cliente. Verificar quantos clientes afetados.",
+    "🔬 Teste de Velocidade":        "Realizado teste de velocidade a pedido do cliente. Verificar velocidade contratada x velocidade entregue, registrar resultado do teste, verificar se há throttling ou limitação no perfil.",
+}
+
+TIPOS = [
+    "Suporte Técnico", "Instalação", "Financeiro", "Cancelamento",
+    "Manutenção", "Visita Técnica — Conexão", "Visita Técnica — Reincidência",
+    "Configuração", "IPTV/TV Box", "SVA/Câmeras", "Rede Mesh", "Rompimento",
+]
+
+STATUS_BD = {
+    "Resolvido":    "bd-g",
+    "Em Andamento": "bd-w",
+    "Escalado":     "bd-b",
+    "Pendente":     "bd-w",
+    "Cancelado":    "bd-r",
+    "Agendado":     "bd-a",
+}
+
+ESTRELAS = {
+    1: ("★☆☆☆☆", "Muito Insatisfeito", "bd-r"),
+    2: ("★★☆☆☆", "Insatisfeito",       "bd-w"),
+    3: ("★★★☆☆", "Neutro",             "bd-b"),
+    4: ("★★★★☆", "Satisfeito",         "bd-g"),
+    5: ("★★★★★", "Muito Satisfeito",   "bd-a"),
+}
+
+def detectar_tipo(txt):
+    t = txt.lower()
+    r = [
+        (["sem internet","sem acesso","caiu","sem conexão"],              "Suporte Técnico"),
+        (["lentidão","lento","devagar","instável","quedas","oscilando"],  "Suporte Técnico"),
+        (["instalar","instalação","nova instalação","passar cabo"],       "Instalação"),
+        (["cancelar","cancelamento","quero cancelar"],                    "Cancelamento"),
+        (["boleto","pagamento","fatura","cobrança","inadimplência"],      "Financeiro"),
+        (["iptv","tv box","tvbox","televisão"],                           "IPTV/TV Box"),
+        (["câmera","camera","sva","nvr","dvr"],                           "SVA/Câmeras"),
+        (["mesh","nó de rede"],                                           "Rede Mesh"),
+        (["rompimento","romper","cabo cortado","fibra cortada"],          "Rompimento"),
+        (["reincidência","reincidencia","voltou","segunda vez"],          "Visita Técnica — Reincidência"),
+        (["visita","técnico no local","deslocamento","campo"],            "Visita Técnica — Conexão"),
+        (["reset","configurar","senha","wi-fi","wifi"],                   "Configuração"),
+    ]
+    for palavras, tipo in r:
+        if any(p in t for p in palavras):
+            return tipo
+    return None
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("""
+<div style="display:flex;align-items:center;gap:10px;padding:4px 0 8px">
+  <div style="width:34px;height:34px;background:linear-gradient(135deg,
+    color-mix(in srgb,var(--hi) 22%,transparent),
+    color-mix(in srgb,var(--hi) 6%,transparent));
+    border:1.5px solid color-mix(in srgb,var(--hi) 32%,transparent);
+    border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px">
+    📡</div>
+  <div>
+    <div style="font-size:13px;font-weight:700">Central de Atendimentos</div>
+    <div style="font-size:10px;color:var(--fg2);font-family:'Fira Code',monospace">ISP · v3.0</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    pagina = st.radio("nav", [
+        "📝 Atendimento", "🤖 Assistente", "📂 Histórico", "📊 Dashboard", "📋 Notas"
+    ], label_visibility="collapsed")
+    st.session_state.pagina = pagina
+    st.markdown("---")
+
+    hoje_str   = date.today().isoformat()
+    atend_hoje = [a for a in st.session_state.historico if a.get("data","").startswith(hoje_str)]
+    st.markdown(f"""
+<div class="ctrbox">
+  <div class="ctrnum">{len(atend_hoje)}</div>
+  <div class="ctrlbl">atendimentos hoje</div>
+</div>""", unsafe_allow_html=True)
+    st.markdown("")
+
+    if atend_hoje:
+        with st.expander("📊 Resumo do dia"):
+            for t, n in pd.Series([a.get("tipo","?") for a in atend_hoje]).value_counts().items():
+                st.markdown(f'<span class="bd bd-a">{t}: {n}</span>', unsafe_allow_html=True)
+            res = len([a for a in atend_hoje if a.get("status") == "Resolvido"])
+            notas = [a["nota_cliente"] for a in atend_hoje if a.get("nota_cliente")]
+            media = round(sum(notas)/len(notas),1) if notas else None
+            st.markdown(f'<br><span class="dim mono sm">✅ {res} resolvidos</span>', unsafe_allow_html=True)
+            if media:
+                st.markdown(f'<span class="dim mono sm">★ Nota média: {media}</span>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    tema_a = st.session_state.tema
+    if st.button("☀️ Tema Claro" if tema_a == "dark" else "🌙 Tema Escuro", use_container_width=True):
+        st.session_state.tema = "light" if tema_a == "dark" else "dark"
+        st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ATENDIMENTO
+# ══════════════════════════════════════════════════════════════════════════════
+if "Atendimento" in st.session_state.pagina:
+
+    st.markdown("""<div class="phdr">
+  <div class="pico">📝</div>
+  <div><div class="ptitle">Novo Atendimento</div>
+       <div class="psub">Preencha os dados · a IA formata e melhora o texto automaticamente</div></div>
+</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    cf = st.session_state.clear_flag
+
+    # Linha 1
+    c1, c2, c3, c4 = st.columns([2.2, 1.2, 0.9, 0.9])
+    with c1: nome  = st.text_input("👤 Nome do Cliente",  placeholder="Ex: João Silva",    key=f"nome_{cf}")
+    with c2: proto = st.text_input("🔖 Protocolo",        placeholder="Ex: 2024-001847",   key=f"prot_{cf}")
+    with c3: tom   = st.selectbox("🎙️ Tom",  ["Formal","Técnico","Simples"],               key=f"tom_{cf}")
+    with c4:
+        nota = st.selectbox("⭐ Nota", [0,1,2,3,4,5],
+            format_func=lambda x: "— Sem nota —" if x == 0 else ESTRELAS[x][0],
+            key=f"nota_{cf}")
+    if nota > 0:
+        es, sl, sb = ESTRELAS[nota]
+        st.markdown(f'<span class="bd {sb}">{es} {sl}</span>', unsafe_allow_html=True)
+
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    # Template
+    st.markdown('<span class="slbl">⚡ Atalho rápido</span>', unsafe_allow_html=True)
+    ct1, ct2 = st.columns([5, 1])
+    with ct1: tpl_sel = st.selectbox("tpl", list(TEMPLATES.keys()), label_visibility="collapsed", key=f"tpl_{cf}")
+    with ct2:
+        if st.button("Usar →", use_container_width=True):
+            if tpl_sel != "— Selecione —":
+                st.session_state["tpl_txt"] = TEMPLATES[tpl_sel]
+                st.rerun()
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+    # Resumo
+    st.markdown('<span class="slbl">📝 Resumo do atendimento</span>', unsafe_allow_html=True)
+    tpl_init = st.session_state.pop("tpl_txt", "")
+    resumo = st.text_area("res", value=tpl_init, height=150,
+        placeholder="Descreva livremente o que aconteceu no atendimento...",
+        label_visibility="collapsed", key=f"res_{cf}")
+
+    tipo_det = detectar_tipo(resumo) if resumo else None
+    idx_tipo = TIPOS.index(tipo_det) if tipo_det and tipo_det in TIPOS else 0
+    if tipo_det:
+        st.markdown(f'<span class="bd bd-a">🤖 Detectado: {tipo_det}</span>', unsafe_allow_html=True)
+
+    ct, cs = st.columns(2)
+    with ct: tipo   = st.selectbox("📂 Tipo",   TIPOS, index=idx_tipo, key=f"tipo_{cf}")
+    with cs: status = st.selectbox("🚦 Status", ["Resolvido","Em Andamento","Escalado","Pendente","Agendado","Cancelado"], key=f"stat_{cf}")
+
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+    # Dados técnicos
+    with st.expander("🔧 Dados técnicos (opcional)"):
+        da, db = st.columns(2)
+        with da:
+            mac    = st.text_input("MAC / S.N ONU",      placeholder="A1:B2:C3:D4:E5:F6", key=f"mac_{cf}")
+            auth   = st.selectbox("Autenticação",        ["—","PPPoE","IPoE / DHCP"],       key=f"auth_{cf}")
+            sinal  = st.text_input("Sinal ONU (dBm)",    placeholder="-18 dBm",             key=f"sinal_{cf}")
+        with db:
+            ip_cli = st.text_input("IP do Cliente",      placeholder="192.168.1.100",       key=f"ip_{cf}")
+            dns    = st.selectbox("DNS Setado",           ["—","Sim","Não"],                 key=f"dns_{cf}")
+            obs    = st.text_area("Obs. técnicas",        height=78,                         key=f"obs_{cf}",
+                                  placeholder="Cabo com dobra, ONU de terceiros, etc.")
+
+    def dados_tec():
+        r = []
+        if mac:        r.append(f"MAC/S.N ONU: {mac}")
+        if auth!="—":  r.append(f"Autenticação: {auth}")
+        if sinal:      r.append(f"Sinal ONU: {sinal}")
+        if ip_cli:     r.append(f"IP cliente: {ip_cli}")
+        if dns!="—":   r.append(f"DNS Setado: {dns}")
+        if obs:        r.append(f"Obs.: {obs}")
+        return "\n".join(r) if r else "Nenhum dado técnico informado."
+
+    st.markdown("---")
+
+    cb1, cb2, cb3 = st.columns([2,2,1])
+    with cb1:
+        st.markdown('<div class="pri">', unsafe_allow_html=True)
+        gerar = st.button("⚡ Gerar Registro", use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with cb2:
+        st.markdown('<div class="pri">', unsafe_allow_html=True)
+        gerar_msg = st.button("💬 Gerar Mensagem ao Cliente", use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with cb3:
+        st.markdown('<div class="dng">', unsafe_allow_html=True)
+        limpar = st.button("🗑 Limpar", use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if limpar:
+        st.session_state.output_registro = ""
+        st.session_state.output_cliente  = ""
+        st.session_state.versoes         = []
+        st.session_state.clear_flag     += 1
+        st.rerun()
+
+    tom_sys = {
+        "Formal":  "Use linguagem formal e corporativa.",
+        "Técnico": "Use linguagem técnica com termos de redes e telecomunicações.",
+        "Simples": "Use linguagem clara e simples.",
+    }
+
+    def sat_bloco(n):
+        if n == 0: return ""
+        _, lbl, _ = ESTRELAS[n]
+        desc = {
+            1: "Cliente demonstrou insatisfação significativa. Recomenda-se retorno proativo e acompanhamento.",
+            2: "Cliente não ficou satisfeito. Verificar pontos de melhoria no atendimento.",
+            3: "Atendimento avaliado como neutro. Há oportunidade de melhoria.",
+            4: "Cliente ficou satisfeito com o atendimento realizado.",
+            5: "Cliente demonstrou alto grau de satisfação. Excelente desempenho.",
+        }
+        return f"\nSATISFAÇÃO DO CLIENTE:\nNota: {n}/5 — {lbl}\nAnálise: {desc[n]}"
+
+    if gerar:
+        if not resumo.strip():
+            st.warning("Preencha o resumo antes de gerar.")
+        else:
+            with st.spinner("Processando e gerando registro..."):
+                prompt = f"""Você é um assistente especialista em suporte de provedores de internet (ISP).
+
+Sua tarefa tem DUAS etapas:
+
+ETAPA 1 — MELHORIA DO TEXTO:
+Reescreva o resumo do atendente de forma mais clara, objetiva e profissional, sem inventar informações. Mantenha todos os fatos originais.
+
+ETAPA 2 — REGISTRO FORMAL:
+Com base no resumo melhorado, gere o registro de atendimento no formato abaixo.
+
+{tom_sys[tom]}
+
+Formato obrigatório (sem texto antes ou depois):
+
+DATA/HORA: {datetime.now().strftime('%d/%m/%Y %H:%M')}
+CLIENTE: {nome or 'Não informado'}
+PROTOCOLO: {proto or 'Não informado'}
+TIPO: {tipo}
+STATUS: {status}
+
+RESUMO MELHORADO:
+[versão melhorada do resumo original]
+
+DESCRIÇÃO DO PROBLEMA/SOLICITAÇÃO:
+[descrição detalhada do que o cliente relatou]
+
+PROCEDIMENTOS REALIZADOS:
+[passo a passo do que foi feito]
+
+DADOS TÉCNICOS:
+{dados_tec()}
+
+OBSERVAÇÕES:
+[observações relevantes ou "Nenhuma."]{sat_bloco(nota)}
+
+Resumo original do atendente:
+\"\"\"{resumo}\"\"\""""
+                resultado = chamar_ia(prompt)
+                st.session_state.output_registro = resultado
+                st.session_state.versoes.append({
+                    "ts": datetime.now().strftime("%H:%M:%S"),
+                    "texto": resultado
+                })
+
+    if gerar_msg:
+        if not resumo.strip():
+            st.warning("Preencha o resumo antes de gerar.")
+        else:
+            with st.spinner("Gerando mensagem..."):
+                prompt = f"""Você é um atendente cordial de um provedor de internet. Escreva uma mensagem curta para enviar ao cliente.
+Cliente: {nome or 'cliente'} | Status: {status}
+Resumo: {resumo}
+Regras: máximo 5 linhas, cordial e profissional, confirmar o que foi feito, indicar o status, encerrar com disposição para ajudar.
+Retorne APENAS a mensagem."""
+                st.session_state.output_cliente = chamar_ia(prompt)
+
+    # Saída
+    if st.session_state.output_registro or st.session_state.output_cliente:
+        st.markdown("---")
+        t1, t2, t3 = st.tabs(["📋 Registro", "💬 Mensagem ao Cliente", "🕓 Versões"])
+
+        with t1:
+            if st.session_state.output_registro:
+                st.markdown(f'<div class="outbox">{st.session_state.output_registro}</div>', unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+                bc1, bc2, bc3 = st.columns(3)
+                with bc1:
+                    st.download_button("⬇️ Baixar .txt", st.session_state.output_registro,
+                        file_name=f"atend_{proto or 'sem_protocolo'}.txt",
+                        mime="text/plain", use_container_width=True)
+                with bc2:
+                    if st.button("💾 Salvar no Histórico", use_container_width=True):
+                        item = {
+                            "id": int(datetime.now().timestamp()),
+                            "data": datetime.now().isoformat(),
+                            "cliente": nome, "protocolo": proto,
+                            "tipo": tipo, "status": status,
+                            "nota_cliente": nota if nota > 0 else None,
+                            "resumo": resumo[:120],
+                            "registro": st.session_state.output_registro,
+                            "msg_cliente": st.session_state.output_cliente,
+                        }
+                        st.session_state.historico.insert(0, item)
+                        save_historico(st.session_state.historico)
+                        st.success("✅ Salvo!")
+                with bc3:
+                    txt_js = st.session_state.output_registro.replace("\\","\\\\").replace("`","\\`").replace("${","\\${").replace("\n","\\n")
+                    components.html(f"""<button id="bc1" onclick="navigator.clipboard.writeText(`{txt_js}`).then(()=>{{document.getElementById('bc1').innerText='✅ Copiado!';setTimeout(()=>document.getElementById('bc1').innerText='📋 Copiar',2000)}})" style="width:100%;padding:9px;background:#a78bfa;color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:Sora,sans-serif">📋 Copiar</button>""", height=44)
+
+        with t2:
+            if st.session_state.output_cliente:
+                st.markdown(f'<div class="outbox">{st.session_state.output_cliente}</div>', unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+                bm1, bm2 = st.columns(2)
+                with bm1:
+                    st.download_button("⬇️ Baixar", st.session_state.output_cliente,
+                        file_name="msg_cliente.txt", mime="text/plain", use_container_width=True)
+                with bm2:
+                    txt_js2 = st.session_state.output_cliente.replace("\\","\\\\").replace("`","\\`").replace("${","\\${").replace("\n","\\n")
+                    components.html(f"""<button id="bc2" onclick="navigator.clipboard.writeText(`{txt_js2}`).then(()=>{{document.getElementById('bc2').innerText='✅ Copiado!';setTimeout(()=>document.getElementById('bc2').innerText='📋 Copiar',2000)}})" style="width:100%;padding:9px;background:#a78bfa;color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:Sora,sans-serif">📋 Copiar</button>""", height=44)
+            else:
+                st.info("Clique em 'Gerar Mensagem ao Cliente' para criar a mensagem.")
+
+        with t3:
+            if st.session_state.versoes:
+                for i, v in enumerate(reversed(st.session_state.versoes)):
+                    with st.expander(f"Versão {len(st.session_state.versoes)-i} — {v['ts']}"):
+                        st.markdown(f'<div class="outbox" style="font-size:12px">{v["texto"]}</div>', unsafe_allow_html=True)
+            else:
+                st.info("Nenhuma versão ainda.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ASSISTENTE
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Assistente" in st.session_state.pagina:
+
+    st.markdown("""<div class="phdr">
+  <div class="pico">🤖</div>
+  <div><div class="ptitle">Assistente de Atendimento</div>
+       <div class="psub">Descreva o problema · receba diagnóstico, passos e orientações em tempo real</div></div>
+</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    SYSTEM_ASSISTENTE = """Você é um assistente técnico especialista em provedores de internet (ISP) no Brasil.
+Seu papel é ajudar atendentes de suporte a diagnosticar e resolver problemas dos clientes.
+
+Você deve:
+- Fazer perguntas de diagnóstico quando o problema não estiver claro
+- Sugerir próximos passos práticos e objetivos
+- Responder dúvidas técnicas sobre redes, fibra óptica, ONUs, roteadores, PPPoE, IPoE, IPTV, etc.
+- Orientar sobre como proceder em situações específicas do ISP
+- Ser direto e útil, sem enrolação
+
+Quando o atendente descrever um problema, siga este fluxo:
+1. Se faltar informação, faça no máximo 2 perguntas para diagnosticar
+2. Quando tiver informação suficiente, dê o diagnóstico provável e os passos para resolver
+3. Ao final, sugira o que registrar no sistema
+
+Responda sempre em português, de forma clara e profissional."""
+
+    # Sugestões rápidas
+    st.markdown('<span class="slbl">💡 Sugestões rápidas</span>', unsafe_allow_html=True)
+    sq1, sq2, sq3, sq4 = st.columns(4)
+    sugestoes = {
+        "Sem internet": "Cliente está sem internet. ONU está com luz vermelha.",
+        "Lentidão":     "Cliente reclama que a internet está muito lenta, especialmente à noite.",
+        "ONU alarmada": "Sistema mostrando ONU em alarme, cliente não passou nada.",
+        "Rompimento":   "Vários clientes da mesma região caíram ao mesmo tempo.",
+    }
+    for col, (label, texto) in zip([sq1, sq2, sq3, sq4], sugestoes.items()):
+        with col:
+            if st.button(label, use_container_width=True, key=f"sq_{label}"):
+                st.session_state.chat_msgs.append({"role":"user","content":texto})
+                with st.spinner("Analisando..."):
+                    resposta = chamar_ia(
+                        st.session_state.chat_msgs,
+                        system=SYSTEM_ASSISTENTE
+                    )
+                st.session_state.chat_msgs.append({"role":"assistant","content":resposta})
+                st.rerun()
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    # Histórico do chat
+    if st.session_state.chat_msgs:
+        for msg in st.session_state.chat_msgs:
+            if msg["role"] == "user":
+                st.markdown(f"""
+<div>
+  <div class="cmsg-label" style="text-align:right">você</div>
+  <div class="cmsg-user">{msg["content"]}</div>
+</div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+<div>
+  <div class="cmsg-label">🤖 assistente</div>
+  <div class="cmsg-ai">{msg["content"]}</div>
+</div>""", unsafe_allow_html=True)
+    else:
+        st.markdown("""
+<div style="text-align:center;padding:40px 20px;color:var(--fg2)">
+  <div style="font-size:36px;margin-bottom:12px">🤖</div>
+  <div style="font-size:14px;font-weight:500;margin-bottom:6px">Assistente pronto para ajudar</div>
+  <div style="font-size:12px;font-family:'Fira Code',monospace">
+    Descreva o problema do cliente ou use uma sugestão rápida acima
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    # Input
+    ci1, ci2 = st.columns([5, 1])
+    with ci1:
+        user_input = st.text_input("msg", placeholder="Descreva o problema ou faça uma pergunta técnica...",
+                                   label_visibility="collapsed", key="chat_input")
+    with ci2:
+        st.markdown('<div class="pri">', unsafe_allow_html=True)
+        enviar = st.button("Enviar →", use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if enviar and user_input.strip():
+        st.session_state.chat_msgs.append({"role":"user","content":user_input.strip()})
+        with st.spinner("Analisando..."):
+            resposta = chamar_ia(
+                st.session_state.chat_msgs,
+                system=SYSTEM_ASSISTENTE
+            )
+        st.session_state.chat_msgs.append({"role":"assistant","content":resposta})
+        st.rerun()
+
+    if st.session_state.chat_msgs:
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+        cc1, cc2 = st.columns([1, 3])
+        with cc1:
+            st.markdown('<div class="dng">', unsafe_allow_html=True)
+            if st.button("🗑 Limpar conversa", use_container_width=True):
+                st.session_state.chat_msgs = []
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HISTÓRICO
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Histórico" in st.session_state.pagina:
+
+    st.markdown("""<div class="phdr">
+  <div class="pico">📂</div>
+  <div><div class="ptitle">Histórico</div>
+       <div class="psub">Todos os atendimentos registrados</div></div>
+</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    hist = st.session_state.historico
+    if not hist:
+        st.info("Nenhum atendimento salvo ainda.")
+    else:
+        hc1, hc2, hc3 = st.columns(3)
+        with hc1: busca = st.text_input("🔍 Buscar", placeholder="Nome, protocolo, palavra...")
+        with hc2: f_tipo = st.selectbox("Tipo", ["Todos"] + TIPOS)
+        with hc3: f_stat = st.selectbox("Status", ["Todos"] + list(STATUS_BD.keys()))
+
+        fil = hist
+        if busca:
+            b = busca.lower()
+            fil = [a for a in fil if any(b in (a.get(k) or "").lower() for k in ["cliente","protocolo","resumo","registro"])]
+        if f_tipo != "Todos": fil = [a for a in fil if a.get("tipo") == f_tipo]
+        if f_stat != "Todos": fil = [a for a in fil if a.get("status") == f_stat]
+
+        st.markdown(f'<span class="bd bd-a">{len(fil)} registro(s)</span>', unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        if fil:
+            df_exp = pd.DataFrame([{"Data":a.get("data","")[:16].replace("T"," "),
+                "Cliente":a.get("cliente",""), "Protocolo":a.get("protocolo",""),
+                "Tipo":a.get("tipo",""), "Status":a.get("status",""),
+                "Nota":a.get("nota_cliente",""), "Resumo":a.get("resumo","")} for a in fil])
+            st.download_button("⬇️ Exportar CSV", df_exp.to_csv(index=False).encode("utf-8"),
+                               "historico.csv", "text/csv")
+
+        for i, a in enumerate(fil):
+            dt   = a.get("data","")[:16].replace("T"," ")
+            cli  = a.get("cliente") or "—"
+            tp   = a.get("tipo","?")
+            prot = a.get("protocolo") or "—"
+            nota_a = a.get("nota_cliente")
+            sbdg = STATUS_BD.get(a.get("status",""), "bd-a")
+
+            with st.expander(f"#{len(hist)-i:03d}  {dt}  ·  {cli}  ·  {tp}"):
+                hh1, hh2 = st.columns([2,1])
+                with hh1:
+                    st.markdown(f'<span class="slbl">Protocolo: {prot}</span>', unsafe_allow_html=True)
+                    st.markdown(f'<span class="bd {sbdg}">{a.get("status","")}</span>', unsafe_allow_html=True)
+                    if nota_a:
+                        es2, sl2, sb2 = ESTRELAS[nota_a]
+                        st.markdown(f'<span class="bd {sb2}">{es2} {sl2}</span>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="outbox" style="margin-top:10px;font-size:12px">{a.get("registro","")}</div>', unsafe_allow_html=True)
+                with hh2:
+                    if a.get("msg_cliente"):
+                        st.markdown('<span class="slbl">Mensagem ao cliente</span>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="outbox" style="font-size:12px">{a.get("msg_cliente","")}</div>', unsafe_allow_html=True)
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown('<div class="dng">', unsafe_allow_html=True)
+                    if st.button("🗑 Excluir", key=f"del_{a['id']}", use_container_width=True):
+                        st.session_state.historico = [x for x in st.session_state.historico if x["id"] != a["id"]]
+                        save_historico(st.session_state.historico)
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Dashboard" in st.session_state.pagina:
+
+    st.markdown("""<div class="phdr">
+  <div class="pico">📊</div>
+  <div><div class="ptitle">Dashboard</div>
+       <div class="psub">Análise de atendimentos e satisfação</div></div>
+</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    hist = st.session_state.historico
+    if not hist:
+        st.info("Nenhum dado disponível. Salve alguns atendimentos primeiro.")
+    else:
+        df = pd.DataFrame(hist)
+        df["data_dt"] = pd.to_datetime(df["data"], errors="coerce")
+        df["dia"]     = df["data_dt"].dt.date
+
+        hoje   = date.today()
+        total  = len(df)
+        hj     = len(df[df["dia"] == hoje])
+        res    = len(df[df["status"] == "Resolvido"]) if "status" in df.columns else 0
+        taxa   = round(res/total*100) if total else 0
+        notas  = [a.get("nota_cliente") for a in hist if a.get("nota_cliente")]
+        media  = round(sum(notas)/len(notas),1) if notas else None
+
+        m1,m2,m3,m4,m5 = st.columns(5)
+        m1.metric("Total", total)
+        m2.metric("Hoje", hj)
+        m3.metric("Resolvidos", res)
+        m4.metric("Taxa", f"{taxa}%")
+        m5.metric("Nota Média", f"{media} ★" if media else "—")
+
+        st.markdown("---")
+        dc1, dc2 = st.columns(2)
+
+        with dc1:
+            st.markdown('<span class="slbl">Atendimentos por tipo</span>', unsafe_allow_html=True)
+            if "tipo" in df.columns:
+                tc = df["tipo"].value_counts().reset_index()
+                tc.columns = ["Tipo","Qtd"]
+                st.bar_chart(tc.set_index("Tipo"))
+
+        with dc2:
+            st.markdown('<span class="slbl">Ranking do mês</span>', unsafe_allow_html=True)
+            dfm = df[df["data_dt"].dt.month == hoje.month]
+            if "tipo" in dfm.columns and not dfm.empty:
+                rk = dfm["tipo"].value_counts().reset_index()
+                rk.columns = ["Tipo","N"]
+                for _, row in rk.iterrows():
+                    pct = int(row["N"]/len(dfm)*100)
+                    st.markdown(f"""<div style="margin-bottom:10px">
+<div style="display:flex;justify-content:space-between;margin-bottom:4px">
+  <span class="mono sm">{row['Tipo']}</span>
+  <span class="hi mono sm">{row['N']}</span>
+</div>
+<div style="background:var(--line2);border-radius:4px;height:6px">
+  <div style="background:var(--hi);width:{pct}%;height:6px;border-radius:4px;
+  box-shadow:0 0 8px color-mix(in srgb,var(--hi) 40%,transparent)"></div>
+</div></div>""", unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown('<span class="slbl">Atendimentos por dia</span>', unsafe_allow_html=True)
+        pd_dia = df.groupby("dia").size().reset_index(name="Atendimentos").sort_values("dia")
+        st.line_chart(pd_dia.set_index("dia"))
+
+        st.markdown("---")
+        ds1, ds2 = st.columns(2)
+        with ds1:
+            st.markdown('<span class="slbl">Status</span>', unsafe_allow_html=True)
+            if "status" in df.columns:
+                for s, n in df["status"].value_counts().items():
+                    st.markdown(f'<span class="bd {STATUS_BD.get(s,"bd-a")}">{s}: {n}</span>', unsafe_allow_html=True)
+        with ds2:
+            if notas:
+                st.markdown('<span class="slbl">Distribuição de notas</span>', unsafe_allow_html=True)
+                nd = pd.Series(notas).value_counts().sort_index().reset_index()
+                nd.columns = ["Nota","Qtd"]
+                nd["Nota"] = nd["Nota"].apply(lambda x: "★"*x)
+                st.bar_chart(nd.set_index("Nota"))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NOTAS
+# ══════════════════════════════════════════════════════════════════════════════
+elif "Notas" in st.session_state.pagina:
+
+    st.markdown("""<div class="phdr">
+  <div class="pico">📋</div>
+  <div><div class="ptitle">Bloco de Notas</div>
+       <div class="psub">Rascunhos durante a ligação · salvo automaticamente</div></div>
+</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+
+    nv  = load_notas()
+    ne  = st.text_area("n", value=nv, height=480,
+          placeholder="Anote aqui durante a ligação...\n\nEx:\n- Cliente: João Silva\n- Problema: sem internet desde ontem\n- ONU com luz vermelha...",
+          label_visibility="collapsed")
+
+    nc1, nc2 = st.columns([1,4])
+    with nc1:
+        st.markdown('<div class="pri">', unsafe_allow_html=True)
+        if st.button("💾 Salvar", use_container_width=True):
+            save_notas(ne)
+            st.success("Salvo!")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with nc2:
+        st.markdown('<div class="dng">', unsafe_allow_html=True)
+        if st.button("🗑 Limpar tudo"):
+            save_notas("")
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if ne != nv:
+        save_notas(ne)
